@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+qdrant-client
+fastembed
+pypdf
+openai
+python-multipart
+python-dotenv
+pydantic-settings
