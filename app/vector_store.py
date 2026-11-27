@@ -7,20 +7,49 @@ from qdrant_client import QdrantClient, models
 from app.config import settings
 
 # Collection and embedding configurations
-COLLECTION_NAME = "docs_rag"
-MODEL_NAME = "BAAI/bge-small-en-v1.5"
+COLLECTION_NAME = settings.QDRANT_COLLECTION_NAME or "rag_collection"
+MODEL_NAME = settings.EMBEDDING_MODEL_NAME or "BAAI/bge-small-en-v1.5"
 VECTOR_SIZE = 384  # Embedding dimension for BAAI/bge-small-en-v1.5
 
 # Retrieve credentials from settings or environment variables
 QDRANT_URL = settings.QDRANT_URL or os.getenv("QDRANT_URL", "")
 QDRANT_API_KEY = settings.QDRANT_API_KEY or os.getenv("QDRANT_API_KEY", "")
 
+
+def _init_qdrant_client() -> QdrantClient:
+    """
+    Initializes QdrantClient based on configuration:
+    - If a valid remote URL is provided (not placeholder), connects to remote cluster.
+    - If url is ':memory:' or 'memory', uses in-memory Qdrant.
+    - Otherwise, falls back to embedded local storage ('./qdrant_data') so the app
+      runs out of the box without requiring external cloud accounts.
+    """
+    url = (settings.QDRANT_URL or os.getenv("QDRANT_URL", "")).strip()
+    api_key = (settings.QDRANT_API_KEY or os.getenv("QDRANT_API_KEY", "")).strip()
+
+    is_placeholder = "your-cluster-id" in url or "your-qdrant-api-key" in api_key
+
+    if url and not is_placeholder and url.lower() not in (":memory:", "memory", "local"):
+        print(f"[Qdrant] Connecting to remote cluster at {url}...")
+        return QdrantClient(url=url, api_key=api_key or None)
+
+    if url.lower() in (":memory:", "memory"):
+        print("[Qdrant] Running with in-memory storage (:memory:).")
+        return QdrantClient(location=":memory:")
+
+    # Local disk persistence mode (fallback for local development without cloud cluster)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    storage_dir = os.path.join(project_root, "qdrant_data")
+    try:
+        print(f"[Qdrant] Remote QDRANT_URL not configured or using placeholders. Using local storage at '{storage_dir}'.")
+        return QdrantClient(path=storage_dir)
+    except Exception as exc:
+        print(f"[Qdrant Warning] Could not lock local storage ({exc}). Falling back to in-memory mode (:memory:).")
+        return QdrantClient(location=":memory:")
+
+
 # Initialize Qdrant Client
-# Connect to Qdrant Cloud using QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-client = QdrantClient(
-    url=QDRANT_URL or None,
-    api_key=QDRANT_API_KEY or None,
-)
+client = _init_qdrant_client()
 
 # Initialize FastEmbed text embedding model
 embedding_model = TextEmbedding(model_name=MODEL_NAME)
@@ -129,50 +158,3 @@ def add_documents(
     print(f"[Qdrant] Uploaded {len(points)} documents to '{collection_name}'.")
 
     return point_ids
-
-
-# ---------------------------------------------------------------------------
-# Test Block: Upload a dummy sentence to Qdrant Cloud
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    print("\n--- Testing Qdrant Cloud Vector Store ---")
-    print(f"Connecting to Qdrant URL: {QDRANT_URL or 'Default/Local'}")
-    print(f"Target Collection: {COLLECTION_NAME}")
-    print(f"Embedding Model: {MODEL_NAME}")
-
-    dummy_sentence = (
-        "FastAPI with Qdrant Cloud and Gemini creates a high-performance RAG pipeline."
-    )
-    dummy_chunk = {
-        "text": dummy_sentence,
-        "metadata": {
-            "filename": "test_document.txt",
-            "page_number": 1,
-            "source": "cli_test",
-        },
-    }
-
-    try:
-        print(f"\n[Test] Ingesting dummy sentence: '{dummy_sentence}'")
-        point_ids = add_documents([dummy_chunk])
-        print(f"[Test] Success! Uploaded Point ID(s): {point_ids}")
-
-        # Verification query
-        print("\n[Test] Running verification similarity search...")
-        query_text = "Qdrant Cloud RAG pipeline"
-        query_vector = next(embedding_model.embed([query_text]))
-        vector_list = query_vector.tolist() if hasattr(query_vector, "tolist") else list(query_vector)
-
-        search_results = client.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=vector_list,
-            limit=2,
-        )
-
-        print(f"[Test] Search returned {len(search_results)} result(s):")
-        for idx, result in enumerate(search_results, start=1):
-            print(f"  {idx}. Score: {result.score:.4f} | Text: {result.payload.get('text')} | Meta: {result.payload.get('filename')}")
-
-    except Exception as exc:
-        print(f"\n[Test] Error running test against Qdrant Cloud: {exc}")
-        print("[Test] Please verify that QDRANT_URL and QDRANT_API_KEY in your .env file are valid.")

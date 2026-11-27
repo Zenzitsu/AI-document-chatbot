@@ -47,6 +47,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[Startup Warning] Could not initialize Qdrant collection: {e}")
     yield
+    try:
+        qdrant_client.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +103,7 @@ class SourceSnippet(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str = Field(..., description="Grounded answer synthesized by the LLM")
-    sources: List[Dict[str, Any]] = Field(
+    sources: List[SourceSnippet] = Field(
         default_factory=list,
         description="List of cited source chunks with metadata",
     )
@@ -117,6 +121,22 @@ class HealthResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+@app.get(
+    "/",
+    tags=["Health"],
+    summary="Root API info",
+    description="Returns backend service status and links to documentation.",
+)
+def root():
+    """Root endpoint welcoming users and providing navigation links."""
+    return {
+        "status": "online",
+        "service": "FastAPI Qdrant RAG Service",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
 @app.get(
     "/health",
     response_model=HealthResponse,

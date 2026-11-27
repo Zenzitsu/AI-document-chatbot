@@ -55,6 +55,7 @@ htmlcov/
 .cache/
 .fastembed_cache/
 local_qdrant/
+qdrant_data/
 
 # ==========================================
 # Node.js & Next.js Frontend

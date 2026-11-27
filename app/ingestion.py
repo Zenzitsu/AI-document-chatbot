@@ -139,9 +139,3 @@ def process_file(
     else:
         # Default to treating as plain text
         return read_txt(file_bytes, filename=filename, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-
-
-# Functional aliases for flexible import names
-parse_file = process_file
-ingest_file = process_file
-read_file_bytes = process_file

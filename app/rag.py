@@ -9,20 +9,36 @@ from app.vector_store import (
     embedding_model,
 )
 
+from dotenv import dotenv_values, load_dotenv
+
 # Initialize OpenAI client configured for Gemini (or standard OpenAI)
 def get_llm_client() -> OpenAI:
-    """Configures the OpenAI client with Gemini or OpenAI credentials."""
+    """Configures the OpenAI client with Gemini or OpenAI credentials, reading .env fresh."""
+    load_dotenv(override=True)
+    env_vals = dotenv_values(".env")
+
     api_key = (
-        settings.GEMINI_API_KEY
+        env_vals.get("GEMINI_API_KEY")
         or os.getenv("GEMINI_API_KEY")
+        or settings.GEMINI_API_KEY
         or os.getenv("GOOGLE_API_KEY")
         or os.getenv("OPENAI_API_KEY")
         or ""
-    )
-    base_url = settings.GEMINI_BASE_URL
+    ).strip()
+
+    base_url = (
+        env_vals.get("GEMINI_BASE_URL")
+        or os.getenv("GEMINI_BASE_URL")
+        or settings.GEMINI_BASE_URL
+        or "https://generativelanguage.googleapis.com/v1beta/openai/"
+    ).strip()
+
+    # Ensure trailing slash for proper OpenAI URL resolution
+    if not base_url.endswith("/"):
+        base_url += "/"
 
     # If only OPENAI_API_KEY is provided and not Gemini, use default OpenAI base_url
-    if not (settings.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+    if not (api_key.startswith("AIza") or "generativelanguage.googleapis.com" in base_url):
         if os.getenv("OPENAI_API_KEY"):
             base_url = None
 
@@ -57,12 +73,20 @@ def search_context(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
     )
 
     try:
-        # Search Qdrant Cloud collection
-        search_results = qdrant_client.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=vector_list,
-            limit=top_k,
-        )
+        # Search Qdrant collection using query_points (qdrant-client >= 1.10) with fallback
+        if hasattr(qdrant_client, "query_points"):
+            response = qdrant_client.query_points(
+                collection_name=COLLECTION_NAME,
+                query=vector_list,
+                limit=top_k,
+            )
+            search_results = response.points
+        else:
+            search_results = qdrant_client.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=vector_list,
+                limit=top_k,
+            )
     except Exception as e:
         print(f"[RAG] Qdrant search error: {e}")
         return []
@@ -133,41 +157,67 @@ def generate_answer(query: str, top_k: int = 3) -> Dict[str, Any]:
     )
 
     llm_client = get_llm_client()
-    model_name = settings.GEMINI_MODEL or "gemini-1.5-flash"
+    env_vals = dotenv_values(".env")
+    configured_model = (
+        env_vals.get("GEMINI_MODEL")
+        or os.getenv("GEMINI_MODEL")
+        or settings.GEMINI_MODEL
+        or "gemini-1.5-flash"
+    ).strip()
 
-    try:
-        response = llm_client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-        )
-        answer = response.choices[0].message.content or "I do not know."
-        answer = answer.strip()
-    except Exception as e:
-        answer = f"Error generating answer: {e}"
+    # Handle display names like "Gemini 2.5 Flash Lite"
+    primary_model = configured_model
+    if " " in primary_model:
+        if "lite" in primary_model.lower():
+            primary_model = "gemini-2.5-flash-lite"
+        elif "2.5" in primary_model or "flash" in primary_model.lower():
+            primary_model = "gemini-2.5-flash"
+        elif "pro" in primary_model.lower():
+            primary_model = "gemini-2.5-pro"
+        else:
+            primary_model = "gemini-2.5-flash"
+
+    # Candidates list in priority order based on active Google API models
+    candidate_models = [primary_model]
+    for fallback in ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.5-pro"]:
+        if fallback not in candidate_models:
+            candidate_models.append(fallback)
+
+    answer = None
+    last_error = None
+
+    for m in candidate_models:
+        try:
+            response = llm_client.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+            )
+            raw_answer = response.choices[0].message.content or "I do not know."
+            answer = raw_answer.strip()
+            break
+        except Exception as e:
+            last_error = e
+            print(f"[RAG LLM Error] Tried model '{m}': {e}")
+            # If it's a 404 (model not found), try next model in candidate_models
+            if "404" in str(e):
+                continue
+            # For other errors (like auth or rate limit), don't loop endlessly
+            break
+
+    if answer is None:
+        err_msg = str(last_error)
+        if hasattr(last_error, "response") and last_error.response is not None:
+            try:
+                err_msg = last_error.response.text
+            except Exception:
+                pass
+        answer = f"Error generating answer with Gemini: {err_msg}"
 
     return {
         "answer": answer,
         "sources": sources,
     }
-
-
-# ---------------------------------------------------------------------------
-# Test Block: Run a test query against the RAG pipeline
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    print("\n--- Testing RAG Pipeline ---")
-    test_question = "What is this application about?"
-    print(f"Query: {test_question}")
-
-    try:
-        result = generate_answer(query=test_question)
-        print("\n[Result]")
-        print(f"Answer : {result['answer']}")
-        print(f"Sources: {result['sources']}")
-    except Exception as exc:
-        print(f"\n[Test Error] {exc}")
-        print("Ensure Qdrant Cloud and Gemini API credentials are set in .env.")
